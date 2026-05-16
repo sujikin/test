@@ -1,0 +1,64 @@
+name: Netty tcnative Docker comparison
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  native-tls:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: alpine
+            image: eclipse-temurin:17-jdk-alpine
+            expected-openssl: "false"
+          - name: noble
+            image: eclipse-temurin:17-jdk-noble
+            expected-openssl: "true"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run Maven tests inside ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/m2" build/native-tls
+
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --volume "$RUNNER_TEMP/m2:/root/.m2" \
+            --workdir /workspace \
+            "${{ matrix.image }}" \
+            sh -c 'chmod +x ./mvnw && ./mvnw -B -Ddemo.expectedOpenSslAvailable=${{ matrix.expected-openssl }} -Dsurefire.useFile=false test' \
+            | tee "build/native-tls/${{ matrix.name }}.log"
+
+      - name: Summarize native TLS result
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.name }}"
+            echo
+            echo "- Image: \`${{ matrix.image }}\`"
+            echo "- Expected OpenSSL-backed Netty TLS: \`${{ matrix.expected-openssl }}\`"
+            echo
+            echo '```text'
+            if [ -f "build/native-tls/${{ matrix.name }}.log" ]; then
+              grep -E '^(java.version|java.vendor|os.name|os.arch|azure.http.client|netty.openssl)' "build/native-tls/${{ matrix.name }}.log" || true
+            else
+              echo "No test log was produced."
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload native TLS log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-tls-${{ matrix.name }}
+          path: build/native-tls/${{ matrix.name }}.log
+          if-no-files-found: ignore
