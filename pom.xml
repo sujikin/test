@@ -29,6 +29,7 @@
 	<properties>
 		<java.version>17</java.version>
 		<azure-core-http-netty.version>1.16.4</azure-core-http-netty.version>
+		<bouncycastle.version>1.81</bouncycastle.version>
 		<netty-tcnative.version>2.0.75.Final</netty-tcnative.version>
 	</properties>
 	<dependencies>
@@ -53,6 +54,12 @@
 			<groupId>io.netty</groupId>
 			<artifactId>netty-tcnative-boringssl-static</artifactId>
 			<version>${netty-tcnative.version}</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.bouncycastle</groupId>
+			<artifactId>bcpkix-jdk18on</artifactId>
+			<version>${bouncycastle.version}</version>
 			<scope>test</scope>
 		</dependency>
 

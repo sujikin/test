@@ -62,3 +62,84 @@ jobs:
           name: native-tls-${{ matrix.name }}
           path: build/native-tls/${{ matrix.name }}.log
           if-no-files-found: ignore
+
+  azure-netty-performance:
+    name: Azure Netty TLS performance
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run Alpine benchmark
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/m2-performance" build/native-tls
+
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --volume "$RUNNER_TEMP/m2-performance:/root/.m2" \
+            --workdir /workspace \
+            eclipse-temurin:17-jdk-alpine \
+            sh -c 'chmod +x ./mvnw && ./mvnw -B -Dtest=NettyTcnativeBoringSslPerformanceTest -Ddemo.benchmark.enabled=true -Ddemo.benchmark.output=build/native-tls/alpine-benchmark.json -Dsurefire.useFile=false test' \
+            | tee build/native-tls/alpine-benchmark.log
+
+      - name: Run Noble benchmark
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/m2-performance" build/native-tls
+
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --volume "$RUNNER_TEMP/m2-performance:/root/.m2" \
+            --workdir /workspace \
+            eclipse-temurin:17-jdk-noble \
+            sh -c 'chmod +x ./mvnw && ./mvnw -B -Dtest=NettyTcnativeBoringSslPerformanceTest -Ddemo.benchmark.enabled=true -Ddemo.benchmark.output=build/native-tls/noble-benchmark.json -Dsurefire.useFile=false test' \
+            | tee build/native-tls/noble-benchmark.log
+
+      - name: Compare benchmark results
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import textwrap
+
+          alpine = json.loads(pathlib.Path("build/native-tls/alpine-benchmark.json").read_text())
+          noble = json.loads(pathlib.Path("build/native-tls/noble-benchmark.json").read_text())
+
+          def rps(result, section):
+              return float(result[section]["requestsPerSecond"])
+
+          handshake_speedup = rps(noble, "handshakeHeavy") / rps(alpine, "handshakeHeavy")
+          keepalive_speedup = rps(noble, "keepAlive") / rps(alpine, "keepAlive")
+
+          summary = pathlib.Path(__import__("os").environ["GITHUB_STEP_SUMMARY"])
+          summary.write_text(textwrap.dedent(f"""\
+          ### Azure SDK Netty TLS benchmark
+
+          | Metric | Alpine | Noble | Noble speedup |
+          | --- | ---: | ---: | ---: |
+          | OpenSSL available | `{alpine["nettyOpenSslAvailable"]}` | `{noble["nettyOpenSslAvailable"]}` | |
+          | Netty SSL provider | `{alpine["nettySslProvider"]}` | `{noble["nettySslProvider"]}` | |
+          | Handshake-heavy requests/sec | {rps(alpine, "handshakeHeavy"):.2f} | {rps(noble, "handshakeHeavy"):.2f} | {handshake_speedup:.2f}x |
+          | Keep-alive requests/sec | {rps(alpine, "keepAlive"):.2f} | {rps(noble, "keepAlive"):.2f} | {keepalive_speedup:.2f}x |
+
+          The handshake-heavy benchmark opens a new TLS connection for every Azure SDK Netty request. The keep-alive benchmark reuses one TLS connection.
+          """))
+
+          print(f"handshake_speedup={handshake_speedup:.2f}x")
+          print(f"keepalive_speedup={keepalive_speedup:.2f}x")
+
+          if handshake_speedup < 1.20:
+              raise SystemExit(f"Noble handshake-heavy benchmark was only {handshake_speedup:.2f}x faster than Alpine")
+          PY
+
+      - name: Upload performance logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-netty-performance
+          path: |
+            build/native-tls/*-benchmark.json
+            build/native-tls/*-benchmark.log
+          if-no-files-found: ignore
