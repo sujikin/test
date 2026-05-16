@@ -1,10 +1,10 @@
 package com.sujikin.demo;
 
 import com.azure.core.http.HttpClient;
-import com.azure.core.http.HttpMethod;
-import com.azure.core.http.HttpRequest;
-import com.azure.core.http.HttpResponse;
 import com.azure.core.http.netty.NettyAsyncHttpClientBuilder;
+import com.azure.data.appconfiguration.ConfigurationClient;
+import com.azure.data.appconfiguration.ConfigurationClientBuilder;
+import com.azure.data.appconfiguration.models.ConfigurationSetting;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.handler.ssl.OpenSsl;
 import io.netty.handler.ssl.SslContext;
@@ -21,11 +21,12 @@ import reactor.netty.DisposableServer;
 import reactor.netty.http.server.HttpServer;
 import reactor.netty.resources.ConnectionProvider;
 
-import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -33,15 +34,26 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-class NettyTcnativeBoringSslPerformanceTest {
+class AzureAppConfigurationNettyPerformanceTest {
 
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
+    private static final String CONFIGURATION_KEY = "demo-message";
+    private static final String CONFIGURATION_VALUE = "hello-from-local-app-configuration";
     private static final String RESPONSE_BODY = """
-            {"value":[{"id":1,"name":"Ada Lovelace","email":"ada@example.test","city":"London"}]}
+            {
+              "etag": "\\"test-etag\\"",
+              "key": "demo-message",
+              "label": null,
+              "content_type": "text/plain",
+              "value": "hello-from-local-app-configuration",
+              "last_modified": "2026-01-01T00:00:00Z",
+              "locked": false,
+              "tags": {}
+            }
             """;
 
     @Test
-    void benchmarksAzureNettyClientOverLocalTls() throws Exception {
+    void benchmarksAzureAppConfigurationClientOverLocalTls() throws Exception {
         Assumptions.assumeTrue(Boolean.getBoolean("demo.benchmark.enabled"),
                 "set -Ddemo.benchmark.enabled=true to run the benchmark");
 
@@ -64,20 +76,21 @@ class NettyTcnativeBoringSslPerformanceTest {
                     .host("127.0.0.1")
                     .port(0)
                     .secure(spec -> spec.sslContext(configuredServerSslContext))
-                    .route(routes -> routes.get("/people", (request, response) -> response
-                            .header("content-type", "application/json")
-                            .sendString(Mono.just(RESPONSE_BODY))))
+                    .handle((request, response) -> response
+                            .header("content-type", "application/vnd.microsoft.appconfig.kv+json; charset=utf-8")
+                            .header("etag", "\"test-etag\"")
+                            .sendString(Mono.just(RESPONSE_BODY)))
                     .bindNow();
 
-            URL url = new URL("https://localhost:" + server.port() + "/people");
-
-            keepAliveProvider = ConnectionProvider.create("azure-netty-benchmark-keepalive", 1);
+            keepAliveProvider = ConnectionProvider.create("azure-app-config-benchmark-keepalive", 1);
             keepAliveClientSslContext = clientSslContext(provider);
-            HttpClient keepAliveClient = azureClient(keepAliveProvider, keepAliveClientSslContext, true);
+            ConfigurationClient keepAliveClient = appConfigurationClient(server.port(),
+                    azureClient(keepAliveProvider, keepAliveClientSslContext, true));
 
             newConnectionProvider = ConnectionProvider.newConnection();
             newConnectionClientSslContext = clientSslContext(provider);
-            HttpClient newConnectionClient = azureClient(newConnectionProvider, newConnectionClientSslContext, false);
+            ConfigurationClient newConnectionClient = appConfigurationClient(server.port(),
+                    azureClient(newConnectionProvider, newConnectionClientSslContext, false));
 
             Map<String, Object> results = new LinkedHashMap<>();
             results.put("benchmarkScenario", System.getProperty("demo.benchmark.scenario"));
@@ -86,21 +99,21 @@ class NettyTcnativeBoringSslPerformanceTest {
             results.put("javaVendor", System.getProperty("java.vendor"));
             results.put("osName", System.getProperty("os.name"));
             results.put("osArch", System.getProperty("os.arch"));
-            results.put("azureHttpClient", keepAliveClient.getClass().getName());
+            results.put("azureSdkClient", ConfigurationClient.class.getName());
             results.put("nettyCommonVersion", artifactVersion("netty-common"));
             results.put("nettyTcnativeVersion", implementationVersion("io.netty.internal.tcnative.SSL"));
             results.put("nettyOpenSslAvailable", OpenSsl.isAvailable());
             results.put("nettySslProvider", provider.name());
             results.put("nettyOpenSslVersion", OpenSsl.isAvailable() ? OpenSsl.versionString() : null);
-            results.put("handshakeHeavy", benchmark(newConnectionClient, url,
-                    intProperty("demo.benchmark.handshakeWarmupRequests", 25),
-                    intProperty("demo.benchmark.handshakeRequests", 200)));
-            results.put("keepAlive", benchmark(keepAliveClient, url,
-                    intProperty("demo.benchmark.keepAliveWarmupRequests", 100),
-                    intProperty("demo.benchmark.keepAliveRequests", 1000)));
+            results.put("appConfigurationHandshakeHeavy", benchmark(newConnectionClient,
+                    intProperty("demo.benchmark.handshakeWarmupRequests", 10),
+                    intProperty("demo.benchmark.handshakeRequests", 100)));
+            results.put("appConfigurationKeepAlive", benchmark(keepAliveClient,
+                    intProperty("demo.benchmark.keepAliveWarmupRequests", 50),
+                    intProperty("demo.benchmark.keepAliveRequests", 300)));
 
             String json = new ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(results);
-            System.out.println("azure-netty-benchmark-result");
+            System.out.println("azure-app-configuration-benchmark-result");
             System.out.println(json);
 
             String output = System.getProperty("demo.benchmark.output");
@@ -140,16 +153,26 @@ class NettyTcnativeBoringSslPerformanceTest {
         return new NettyAsyncHttpClientBuilder(reactorClient).build();
     }
 
-    private static Map<String, Object> benchmark(HttpClient client, URL url, int warmupRequests, int measuredRequests) {
+    private static ConfigurationClient appConfigurationClient(int port, HttpClient httpClient) {
+        String secret = Base64.getEncoder().encodeToString("local-test-secret".getBytes(StandardCharsets.UTF_8));
+        String connectionString = "Endpoint=https://localhost:" + port + ";Id=local-test-id;Secret=" + secret;
+
+        return new ConfigurationClientBuilder()
+                .connectionString(connectionString)
+                .httpClient(httpClient)
+                .buildClient();
+    }
+
+    private static Map<String, Object> benchmark(ConfigurationClient client, int warmupRequests, int measuredRequests) {
         for (int i = 0; i < warmupRequests; i++) {
-            send(client, url);
+            getSetting(client);
         }
 
         List<Long> latencies = new ArrayList<>(measuredRequests);
         long totalStarted = System.nanoTime();
         for (int i = 0; i < measuredRequests; i++) {
             long requestStarted = System.nanoTime();
-            send(client, url);
+            getSetting(client);
             latencies.add(System.nanoTime() - requestStarted);
         }
         long elapsed = System.nanoTime() - totalStarted;
@@ -167,17 +190,10 @@ class NettyTcnativeBoringSslPerformanceTest {
         return result;
     }
 
-    private static void send(HttpClient client, URL url) {
-        HttpResponse response = client.send(new HttpRequest(HttpMethod.GET, url))
-                .block(REQUEST_TIMEOUT);
-
-        assertThat(response).isNotNull();
-        try {
-            assertThat(response.getStatusCode()).isEqualTo(200);
-            assertThat(response.getBodyAsByteArray().block(REQUEST_TIMEOUT)).isNotEmpty();
-        } finally {
-            response.close();
-        }
+    private static void getSetting(ConfigurationClient client) {
+        ConfigurationSetting setting = client.getConfigurationSetting(CONFIGURATION_KEY, null);
+        assertThat(setting.getKey()).isEqualTo(CONFIGURATION_KEY);
+        assertThat(setting.getValue()).isEqualTo(CONFIGURATION_VALUE);
     }
 
     private static int intProperty(String name, int defaultValue) {
@@ -192,7 +208,7 @@ class NettyTcnativeBoringSslPerformanceTest {
     private static String implementationVersion(String className) {
         try {
             Package packageInfo = Class.forName(className, false,
-                    NettyTcnativeBoringSslPerformanceTest.class.getClassLoader()).getPackage();
+                    AzureAppConfigurationNettyPerformanceTest.class.getClassLoader()).getPackage();
             return packageInfo == null ? null : packageInfo.getImplementationVersion();
         } catch (Throwable ignored) {
             return null;

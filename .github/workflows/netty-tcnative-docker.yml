@@ -143,3 +143,129 @@ jobs:
             build/native-tls/*-benchmark.json
             build/native-tls/*-benchmark.log
           if-no-files-found: ignore
+
+  azure-app-configuration-netty-regression:
+    name: Azure App Configuration Netty regression
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run Azure App Configuration SDK benchmarks
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/m2-appconfig" build/native-tls
+
+          run_case() {
+            scenario="$1"
+            image="$2"
+            netty_version="$3"
+            tcnative_version="$4"
+
+            echo "Running $scenario on $image with Netty $netty_version and netty-tcnative $tcnative_version"
+            docker run --rm \
+              --volume "$GITHUB_WORKSPACE:/workspace" \
+              --volume "$RUNNER_TEMP/m2-appconfig:/root/.m2" \
+              --workdir /workspace \
+              "$image" \
+              sh -c "chmod +x ./mvnw && ./mvnw -B -Dnetty.version=$netty_version -Dnetty-tcnative.version=$tcnative_version -Dtest=AzureAppConfigurationNettyPerformanceTest -Ddemo.benchmark.enabled=true -Ddemo.benchmark.scenario=$scenario -Ddemo.docker.image=$image -Ddemo.benchmark.handshakeWarmupRequests=10 -Ddemo.benchmark.handshakeRequests=100 -Ddemo.benchmark.keepAliveWarmupRequests=50 -Ddemo.benchmark.keepAliveRequests=300 -Ddemo.benchmark.output=build/native-tls/appconfig-$scenario.json -Dsurefire.useFile=false test" \
+              | tee "build/native-tls/appconfig-$scenario.log"
+          }
+
+          run_case "noble-netty-4.1.132-tcnative-2.0.75" "eclipse-temurin:17-jdk-noble" "4.1.132.Final" "2.0.75.Final"
+          run_case "noble-netty-4.1.133-tcnative-2.0.75" "eclipse-temurin:17-jdk-noble" "4.1.133.Final" "2.0.75.Final"
+          run_case "noble-netty-4.1.133-tcnative-2.0.77" "eclipse-temurin:17-jdk-noble" "4.1.133.Final" "2.0.77.Final"
+          run_case "alpine-netty-4.1.132-tcnative-2.0.75" "eclipse-temurin:17-jdk-alpine" "4.1.132.Final" "2.0.75.Final"
+          run_case "alpine-netty-4.1.133-tcnative-2.0.75" "eclipse-temurin:17-jdk-alpine" "4.1.133.Final" "2.0.75.Final"
+          run_case "alpine-netty-4.1.133-tcnative-2.0.77" "eclipse-temurin:17-jdk-alpine" "4.1.133.Final" "2.0.77.Final"
+
+      - name: Summarize Azure App Configuration SDK benchmarks
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import textwrap
+
+          result_paths = [
+              pathlib.Path("build/native-tls/appconfig-noble-netty-4.1.132-tcnative-2.0.75.json"),
+              pathlib.Path("build/native-tls/appconfig-noble-netty-4.1.133-tcnative-2.0.75.json"),
+              pathlib.Path("build/native-tls/appconfig-noble-netty-4.1.133-tcnative-2.0.77.json"),
+              pathlib.Path("build/native-tls/appconfig-alpine-netty-4.1.132-tcnative-2.0.75.json"),
+              pathlib.Path("build/native-tls/appconfig-alpine-netty-4.1.133-tcnative-2.0.75.json"),
+              pathlib.Path("build/native-tls/appconfig-alpine-netty-4.1.133-tcnative-2.0.77.json"),
+          ]
+
+          rows = []
+          for path in result_paths:
+              if not path.exists():
+                  rows.append({"path": path, "missing": True})
+                  continue
+              result = json.loads(path.read_text())
+              scenario = result["benchmarkScenario"]
+              image = result["dockerImage"]
+              image_family = "noble" if "noble" in image else "alpine"
+              netty = result["nettyCommonVersion"]
+              tcnative = result["nettyTcnativeVersion"]
+              rows.append({
+                  "path": path,
+                  "missing": False,
+                  "scenario": scenario,
+                  "image": image_family,
+                  "netty": netty,
+                  "tcnative": tcnative,
+                  "openssl": result["nettyOpenSslAvailable"],
+                  "provider": result["nettySslProvider"],
+                  "handshake_rps": float(result["appConfigurationHandshakeHeavy"]["requestsPerSecond"]),
+                  "keepalive_rps": float(result["appConfigurationKeepAlive"]["requestsPerSecond"]),
+              })
+
+          baselines = {
+              row["image"]: row for row in rows
+              if not row["missing"] and row["netty"] == "4.1.132.Final" and row["tcnative"] == "2.0.75.Final"
+          }
+
+          def relative(row, metric):
+              baseline = baselines.get(row["image"])
+              if baseline is None:
+                  return ""
+              return f'{row[metric] / baseline[metric]:.2f}x'
+
+          table = [
+              "| Image | Netty | tcnative | OpenSSL | Provider | App Config new TLS req/s | vs 4.1.132 | App Config keep-alive req/s | vs 4.1.132 |",
+              "| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: |",
+          ]
+          for row in rows:
+              if row["missing"]:
+                  scenario = re.sub(r"^appconfig-|\.json$", "", row["path"].name)
+                  table.append(f"| `{scenario}` | missing | missing | | | | | | |")
+                  continue
+              table.append(
+                  f'| {row["image"]} | `{row["netty"]}` | `{row["tcnative"]}` | '
+                  f'`{row["openssl"]}` | `{row["provider"]}` | '
+                  f'{row["handshake_rps"]:.2f} | {relative(row, "handshake_rps")} | '
+                  f'{row["keepalive_rps"]:.2f} | {relative(row, "keepalive_rps")} |'
+              )
+
+          summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
+          summary.write_text(textwrap.dedent("""\
+          ### Azure App Configuration SDK Netty regression
+
+          This benchmark uses the real `azure-data-appconfiguration` synchronous client against a local HTTPS App Configuration-shaped endpoint. No Azure account is required; the measurement isolates Azure SDK + Netty + TLS behavior.
+
+          """) + "\n".join(table) + "\n\n"
+          "Values below `1.00x` are slower than the same-image Netty `4.1.132.Final` baseline.\n")
+          PY
+
+      - name: Upload Azure App Configuration benchmark logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-app-configuration-netty-regression
+          path: |
+            build/native-tls/appconfig-*.json
+            build/native-tls/appconfig-*.log
+          if-no-files-found: ignore
