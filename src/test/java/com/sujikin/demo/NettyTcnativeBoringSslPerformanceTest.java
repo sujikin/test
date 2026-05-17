@@ -89,6 +89,7 @@ class NettyTcnativeBoringSslPerformanceTest {
             results.put("azureHttpClient", keepAliveClient.getClass().getName());
             results.put("nettyCommonVersion", artifactVersion("netty-common"));
             results.put("nettyTcnativeVersion", implementationVersion("io.netty.internal.tcnative.SSL"));
+            results.put("nettyNoOpenSsl", Boolean.getBoolean("io.netty.handler.ssl.noOpenSsl"));
             results.put("nettyOpenSslAvailable", OpenSsl.isAvailable());
             results.put("nettySslProvider", provider.name());
             results.put("nettyOpenSslVersion", OpenSsl.isAvailable() ? OpenSsl.versionString() : null);

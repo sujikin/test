@@ -162,6 +162,7 @@ jobs:
             image="$2"
             netty_version="$3"
             tcnative_version="$4"
+            extra_maven_args="${5:-}"
 
             echo "Running $scenario on $image with Netty $netty_version and netty-tcnative $tcnative_version"
             docker run --rm \
@@ -169,13 +170,14 @@ jobs:
               --volume "$RUNNER_TEMP/m2-appconfig:/root/.m2" \
               --workdir /workspace \
               "$image" \
-              sh -c "chmod +x ./mvnw && ./mvnw -B -Dnetty.version=$netty_version -Dnetty-tcnative.version=$tcnative_version -Dtest=AzureAppConfigurationNettyPerformanceTest -Ddemo.benchmark.enabled=true -Ddemo.benchmark.scenario=$scenario -Ddemo.docker.image=$image -Ddemo.benchmark.handshakeWarmupRequests=10 -Ddemo.benchmark.handshakeRequests=100 -Ddemo.benchmark.keepAliveWarmupRequests=50 -Ddemo.benchmark.keepAliveRequests=300 -Ddemo.benchmark.output=build/native-tls/appconfig-$scenario.json -Dsurefire.useFile=false test" \
+              sh -c "chmod +x ./mvnw && ./mvnw -B -Dnetty.version=$netty_version -Dnetty-tcnative.version=$tcnative_version $extra_maven_args -Dtest=AzureAppConfigurationNettyPerformanceTest -Ddemo.benchmark.enabled=true -Ddemo.benchmark.scenario=$scenario -Ddemo.docker.image=$image -Ddemo.benchmark.handshakeWarmupRequests=10 -Ddemo.benchmark.handshakeRequests=100 -Ddemo.benchmark.keepAliveWarmupRequests=50 -Ddemo.benchmark.keepAliveRequests=300 -Ddemo.benchmark.output=build/native-tls/appconfig-$scenario.json -Dsurefire.useFile=false test" \
               | tee "build/native-tls/appconfig-$scenario.log"
           }
 
           run_case "noble-netty-4.1.132-tcnative-2.0.75" "eclipse-temurin:17-jdk-noble" "4.1.132.Final" "2.0.75.Final"
           run_case "noble-netty-4.1.133-tcnative-2.0.75" "eclipse-temurin:17-jdk-noble" "4.1.133.Final" "2.0.75.Final"
           run_case "noble-netty-4.1.133-tcnative-2.0.77" "eclipse-temurin:17-jdk-noble" "4.1.133.Final" "2.0.77.Final"
+          run_case "noble-netty-4.1.133-no-tcnative-jdk-ssl" "eclipse-temurin:17-jdk-noble" "4.1.133.Final" "2.0.77.Final" "-Ddemo.jdkSslNoTcnative=true -Dio.netty.handler.ssl.noOpenSsl=true"
           run_case "alpine-netty-4.1.132-tcnative-2.0.75" "eclipse-temurin:17-jdk-alpine" "4.1.132.Final" "2.0.75.Final"
           run_case "alpine-netty-4.1.133-tcnative-2.0.75" "eclipse-temurin:17-jdk-alpine" "4.1.133.Final" "2.0.75.Final"
           run_case "alpine-netty-4.1.133-tcnative-2.0.77" "eclipse-temurin:17-jdk-alpine" "4.1.133.Final" "2.0.77.Final"
@@ -194,6 +196,7 @@ jobs:
               pathlib.Path("build/native-tls/appconfig-noble-netty-4.1.132-tcnative-2.0.75.json"),
               pathlib.Path("build/native-tls/appconfig-noble-netty-4.1.133-tcnative-2.0.75.json"),
               pathlib.Path("build/native-tls/appconfig-noble-netty-4.1.133-tcnative-2.0.77.json"),
+              pathlib.Path("build/native-tls/appconfig-noble-netty-4.1.133-no-tcnative-jdk-ssl.json"),
               pathlib.Path("build/native-tls/appconfig-alpine-netty-4.1.132-tcnative-2.0.75.json"),
               pathlib.Path("build/native-tls/appconfig-alpine-netty-4.1.133-tcnative-2.0.75.json"),
               pathlib.Path("build/native-tls/appconfig-alpine-netty-4.1.133-tcnative-2.0.77.json"),
@@ -209,7 +212,7 @@ jobs:
               image = result["dockerImage"]
               image_family = "noble" if "noble" in image else "alpine"
               netty = result["nettyCommonVersion"]
-              tcnative = result["nettyTcnativeVersion"]
+              tcnative = result["nettyTcnativeVersion"] or "not on classpath"
               rows.append({
                   "path": path,
                   "missing": False,
@@ -217,6 +220,7 @@ jobs:
                   "image": image_family,
                   "netty": netty,
                   "tcnative": tcnative,
+                  "no_openssl": result.get("nettyNoOpenSsl", False),
                   "openssl": result["nettyOpenSslAvailable"],
                   "provider": result["nettySslProvider"],
                   "handshake_rps": float(result["appConfigurationHandshakeHeavy"]["requestsPerSecond"]),
@@ -235,16 +239,17 @@ jobs:
               return f'{row[metric] / baseline[metric]:.2f}x'
 
           table = [
-              "| Image | Netty | tcnative | OpenSSL | Provider | App Config new TLS req/s | vs 4.1.132 | App Config keep-alive req/s | vs 4.1.132 |",
-              "| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: |",
+              "| Image | Netty | tcnative | noOpenSSL | OpenSSL | Provider | App Config new TLS req/s | vs 4.1.132 | App Config keep-alive req/s | vs 4.1.132 |",
+              "| --- | --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |",
           ]
           for row in rows:
               if row["missing"]:
                   scenario = re.sub(r"^appconfig-|\.json$", "", row["path"].name)
-                  table.append(f"| `{scenario}` | missing | missing | | | | | | |")
+                  table.append(f"| `{scenario}` | missing | missing | | | | | | | |")
                   continue
               table.append(
                   f'| {row["image"]} | `{row["netty"]}` | `{row["tcnative"]}` | '
+                  f'`{row["no_openssl"]}` | '
                   f'`{row["openssl"]}` | `{row["provider"]}` | '
                   f'{row["handshake_rps"]:.2f} | {relative(row, "handshake_rps")} | '
                   f'{row["keepalive_rps"]:.2f} | {relative(row, "keepalive_rps")} |'

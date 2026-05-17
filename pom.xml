@@ -93,19 +93,8 @@
 		</dependency>
 		<dependency>
 			<groupId>com.azure</groupId>
-			<artifactId>azure-core-http-netty</artifactId>
-			<version>${azure-core-http-netty.version}</version>
-		</dependency>
-		<dependency>
-			<groupId>com.azure</groupId>
 			<artifactId>azure-data-appconfiguration</artifactId>
 			<version>${azure-data-appconfiguration.version}</version>
-		</dependency>
-		<dependency>
-			<groupId>io.netty</groupId>
-			<artifactId>netty-tcnative-boringssl-static</artifactId>
-			<version>${netty-tcnative.version}</version>
-			<scope>test</scope>
 		</dependency>
 		<dependency>
 			<groupId>org.bouncycastle</groupId>
@@ -130,6 +119,50 @@
 			<scope>test</scope>
 		</dependency>
 	</dependencies>
+
+	<profiles>
+		<profile>
+			<id>with-netty-tcnative</id>
+			<activation>
+				<activeByDefault>true</activeByDefault>
+			</activation>
+			<dependencies>
+				<dependency>
+					<groupId>com.azure</groupId>
+					<artifactId>azure-core-http-netty</artifactId>
+					<version>${azure-core-http-netty.version}</version>
+				</dependency>
+				<dependency>
+					<groupId>io.netty</groupId>
+					<artifactId>netty-tcnative-boringssl-static</artifactId>
+					<version>${netty-tcnative.version}</version>
+					<scope>test</scope>
+				</dependency>
+			</dependencies>
+		</profile>
+		<profile>
+			<id>without-netty-tcnative</id>
+			<activation>
+				<property>
+					<name>demo.jdkSslNoTcnative</name>
+					<value>true</value>
+				</property>
+			</activation>
+			<dependencies>
+				<dependency>
+					<groupId>com.azure</groupId>
+					<artifactId>azure-core-http-netty</artifactId>
+					<version>${azure-core-http-netty.version}</version>
+					<exclusions>
+						<exclusion>
+							<groupId>io.netty</groupId>
+							<artifactId>netty-tcnative-boringssl-static</artifactId>
+						</exclusion>
+					</exclusions>
+				</dependency>
+			</dependencies>
+		</profile>
+	</profiles>
 
 	<build>
 		<plugins>
