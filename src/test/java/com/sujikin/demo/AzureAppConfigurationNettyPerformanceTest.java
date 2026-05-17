@@ -57,7 +57,7 @@ class AzureAppConfigurationNettyPerformanceTest {
         Assumptions.assumeTrue(Boolean.getBoolean("demo.benchmark.enabled"),
                 "set -Ddemo.benchmark.enabled=true to run the benchmark");
 
-        SelfSignedCertificate certificate = new SelfSignedCertificate("localhost");
+        SelfSignedCertificate certificate = null;
         SslContext serverSslContext = null;
         SslContext keepAliveClientSslContext = null;
         SslContext newConnectionClientSslContext = null;
@@ -66,12 +66,26 @@ class AzureAppConfigurationNettyPerformanceTest {
         ConnectionProvider newConnectionProvider = null;
 
         try {
-            SslProvider provider = OpenSsl.isAvailable() ? SslProvider.OPENSSL : SslProvider.JDK;
+            Map<String, Object> startupTimings = new LinkedHashMap<>();
+            long startupProbeStarted = System.nanoTime();
+
+            long certificateStarted = System.nanoTime();
+            certificate = new SelfSignedCertificate("localhost");
+            startupTimings.put("certificateCreationMs", nanosToMillis(System.nanoTime() - certificateStarted));
+
+            long openSslCheckStarted = System.nanoTime();
+            boolean openSslAvailable = OpenSsl.isAvailable();
+            startupTimings.put("openSslAvailabilityCheckMs", nanosToMillis(System.nanoTime() - openSslCheckStarted));
+            SslProvider provider = openSslAvailable ? SslProvider.OPENSSL : SslProvider.JDK;
+
+            long serverSslContextStarted = System.nanoTime();
             serverSslContext = SslContextBuilder.forServer(certificate.certificate(), certificate.privateKey())
                     .sslProvider(provider)
                     .build();
+            startupTimings.put("serverSslContextCreationMs", nanosToMillis(System.nanoTime() - serverSslContextStarted));
             SslContext configuredServerSslContext = serverSslContext;
 
+            long serverBindStarted = System.nanoTime();
             server = HttpServer.create()
                     .host("127.0.0.1")
                     .port(0)
@@ -81,16 +95,35 @@ class AzureAppConfigurationNettyPerformanceTest {
                             .header("etag", "\"test-etag\"")
                             .sendString(Mono.just(RESPONSE_BODY)))
                     .bindNow();
+            startupTimings.put("localHttpsServerBindMs", nanosToMillis(System.nanoTime() - serverBindStarted));
 
+            long keepAliveClientStarted = System.nanoTime();
             keepAliveProvider = ConnectionProvider.create("azure-app-config-benchmark-keepalive", 1);
             keepAliveClientSslContext = clientSslContext(provider);
             ConfigurationClient keepAliveClient = appConfigurationClient(server.port(),
                     azureClient(keepAliveProvider, keepAliveClientSslContext, true));
+            startupTimings.put("keepAliveAzureClientCreationMs", nanosToMillis(System.nanoTime() - keepAliveClientStarted));
 
+            long newConnectionClientStarted = System.nanoTime();
             newConnectionProvider = ConnectionProvider.newConnection();
             newConnectionClientSslContext = clientSslContext(provider);
             ConfigurationClient newConnectionClient = appConfigurationClient(server.port(),
                     azureClient(newConnectionProvider, newConnectionClientSslContext, false));
+            startupTimings.put("newConnectionAzureClientCreationMs",
+                    nanosToMillis(System.nanoTime() - newConnectionClientStarted));
+            startupTimings.put("setupBeforeFirstRequestMs", nanosToMillis(System.nanoTime() - startupProbeStarted));
+
+            long firstKeepAliveRequestStarted = System.nanoTime();
+            getSetting(keepAliveClient);
+            startupTimings.put("firstKeepAliveAppConfigurationRequestMs",
+                    nanosToMillis(System.nanoTime() - firstKeepAliveRequestStarted));
+
+            long firstNewConnectionRequestStarted = System.nanoTime();
+            getSetting(newConnectionClient);
+            startupTimings.put("firstNewConnectionAppConfigurationRequestMs",
+                    nanosToMillis(System.nanoTime() - firstNewConnectionRequestStarted));
+            startupTimings.put("startupProbeThroughFirstRequestsMs",
+                    nanosToMillis(System.nanoTime() - startupProbeStarted));
 
             Map<String, Object> results = new LinkedHashMap<>();
             results.put("benchmarkScenario", System.getProperty("demo.benchmark.scenario"));
@@ -103,9 +136,10 @@ class AzureAppConfigurationNettyPerformanceTest {
             results.put("nettyCommonVersion", artifactVersion("netty-common"));
             results.put("nettyTcnativeVersion", implementationVersion("io.netty.internal.tcnative.SSL"));
             results.put("nettyNoOpenSsl", Boolean.getBoolean("io.netty.handler.ssl.noOpenSsl"));
-            results.put("nettyOpenSslAvailable", OpenSsl.isAvailable());
+            results.put("nettyOpenSslAvailable", openSslAvailable);
             results.put("nettySslProvider", provider.name());
-            results.put("nettyOpenSslVersion", OpenSsl.isAvailable() ? OpenSsl.versionString() : null);
+            results.put("nettyOpenSslVersion", openSslAvailable ? OpenSsl.versionString() : null);
+            results.put("startupTimings", startupTimings);
             results.put("appConfigurationHandshakeHeavy", benchmark(newConnectionClient,
                     intProperty("demo.benchmark.handshakeWarmupRequests", 10),
                     intProperty("demo.benchmark.handshakeRequests", 100)));
@@ -132,7 +166,9 @@ class AzureAppConfigurationNettyPerformanceTest {
             release(newConnectionClientSslContext);
             release(keepAliveClientSslContext);
             release(serverSslContext);
-            certificate.delete();
+            if (certificate != null) {
+                certificate.delete();
+            }
         }
     }
 

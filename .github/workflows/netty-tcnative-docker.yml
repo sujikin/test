@@ -213,6 +213,7 @@ jobs:
               image_family = "noble" if "noble" in image else "alpine"
               netty = result["nettyCommonVersion"]
               tcnative = result["nettyTcnativeVersion"] or "not on classpath"
+              startup = result.get("startupTimings", {})
               rows.append({
                   "path": path,
                   "missing": False,
@@ -223,6 +224,11 @@ jobs:
                   "no_openssl": result.get("nettyNoOpenSsl", False),
                   "openssl": result["nettyOpenSslAvailable"],
                   "provider": result["nettySslProvider"],
+                  "openssl_check_ms": float(startup.get("openSslAvailabilityCheckMs", 0.0)),
+                  "setup_before_first_request_ms": float(startup.get("setupBeforeFirstRequestMs", 0.0)),
+                  "first_keepalive_request_ms": float(startup.get("firstKeepAliveAppConfigurationRequestMs", 0.0)),
+                  "first_new_connection_request_ms": float(startup.get("firstNewConnectionAppConfigurationRequestMs", 0.0)),
+                  "startup_probe_ms": float(startup.get("startupProbeThroughFirstRequestsMs", 0.0)),
                   "handshake_rps": float(result["appConfigurationHandshakeHeavy"]["requestsPerSecond"]),
                   "keepalive_rps": float(result["appConfigurationKeepAlive"]["requestsPerSecond"]),
               })
@@ -239,20 +245,24 @@ jobs:
               return f'{row[metric] / baseline[metric]:.2f}x'
 
           table = [
-              "| Image | Netty | tcnative | noOpenSSL | OpenSSL | Provider | App Config new TLS req/s | vs 4.1.132 | App Config keep-alive req/s | vs 4.1.132 |",
-              "| --- | --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |",
+              "| Image | Netty | tcnative | noOpenSSL | OpenSSL | Provider | OpenSSL check ms | setup before first request ms | first keep-alive request ms | first new TLS request ms | startup probe ms | App Config new TLS req/s | vs 4.1.132 |",
+              "| --- | --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
           ]
           for row in rows:
               if row["missing"]:
                   scenario = re.sub(r"^appconfig-|\.json$", "", row["path"].name)
-                  table.append(f"| `{scenario}` | missing | missing | | | | | | | |")
+                  table.append(f"| `{scenario}` | missing | missing | | | | | | | | | | |")
                   continue
               table.append(
                   f'| {row["image"]} | `{row["netty"]}` | `{row["tcnative"]}` | '
                   f'`{row["no_openssl"]}` | '
                   f'`{row["openssl"]}` | `{row["provider"]}` | '
-                  f'{row["handshake_rps"]:.2f} | {relative(row, "handshake_rps")} | '
-                  f'{row["keepalive_rps"]:.2f} | {relative(row, "keepalive_rps")} |'
+                  f'{row["openssl_check_ms"]:.2f} | '
+                  f'{row["setup_before_first_request_ms"]:.2f} | '
+                  f'{row["first_keepalive_request_ms"]:.2f} | '
+                  f'{row["first_new_connection_request_ms"]:.2f} | '
+                  f'{row["startup_probe_ms"]:.2f} | '
+                  f'{row["handshake_rps"]:.2f} | {relative(row, "handshake_rps")} |'
               )
 
           summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
